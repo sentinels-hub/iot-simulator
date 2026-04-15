@@ -1,31 +1,4 @@
 services:
-  backend:
-    build:
-      context: ./backend
-      dockerfile: Dockerfile
-    container_name: iot-simulator-backend
-    security_opt:
-      - seccomp:unconfined
-    ports:
-      - "8000:8000"
-    volumes:
-      - ./profiles:/app/profiles:ro
-      - simulator-data:/app/data
-    env_file:
-      - .env
-    environment:
-      - SIMULATOR_HOST=0.0.0.0
-      - SIMULATOR_PORT=8000
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health')"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-      start_period: 10s
-    networks:
-      - simulator-net
-
   frontend:
     build:
       context: ./frontend
@@ -33,16 +6,4 @@ services:
     container_name: iot-simulator-frontend
     ports:
       - "8080:80"
-    depends_on:
-      backend:
-        condition: service_healthy
     restart: unless-stopped
-    networks:
-      - simulator-net
-
-volumes:
-  simulator-data:
-
-networks:
-  simulator-net:
-    driver: bridge
