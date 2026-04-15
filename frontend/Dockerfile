@@ -2,8 +2,11 @@ FROM node:20-alpine AS build
 
 WORKDIR /app
 
+# Fix EACCES on Alpine — esbuild postinstall needs exec permission
+RUN apk add --no-cache python3 make g++
+
 COPY package.json package-lock.json* ./
-RUN npm install --legacy-peer-deps --unsafe-perm
+RUN npm install --legacy-peer-deps
 
 COPY . .
 RUN npm run build
