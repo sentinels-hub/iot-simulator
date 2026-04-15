@@ -200,5 +200,71 @@ ThingsBoard PE (aiot.sentinels.pro)
 
 - Wakanda is **outside** the network where TB Gateway and TB PE reside
 - This is intentional: simulates real external gateway traffic
-- Expose frontend on port 8080, backend API on port 8000
 - Persistent volumes for config and logs
+
+### Domain and Access
+
+| Service | URL | Port |
+|---|---|---|
+| Frontend (UI) | https://iot-sim.sentinels.pro | 443 |
+| Backend API | https://iot-sim.sentinels.pro/api | 443 |
+| Backend API docs | https://iot-sim.sentinels.pro/docs | 443 |
+
+- Nginx reverse proxy on Wakanda terminates TLS for `iot-sim.sentinels.pro`
+- Frontend and backend are served through the same domain
+- Let's Encrypt certificate for the domain
+- Backend runs on port 8000 internally, proxied to /api
+- Frontend runs on port 80 internally, proxied to /
+
+### DNS Configuration
+
+```
+iot-sim.sentinels.pro.  300  IN  A  <WAKANDA_PUBLIC_IP>
+```
+
+### Nginx Configuration (Wakanda)
+
+```nginx
+server {
+    listen 443 ssl http2;
+    server_name iot-sim.sentinels.pro;
+
+    ssl_certificate /etc/letsencrypt/live/iot-sim.sentinels.pro/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/iot-sim.sentinels.pro/privkey.pem;
+
+    # Frontend
+    location / {
+        proxy_pass http://127.0.0.1:8080;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-Ip $remote_addr;
+    }
+
+    # Backend API
+    location /api/ {
+        proxy_pass http://127.0.0.1:8000/api/;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-Ip $remote_addr;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+    }
+
+    # Backend API docs
+    location /docs {
+        proxy_pass http://127.0.0.1:8000/docs;
+        proxy_set_header Host $host;
+    }
+
+    location /openapi.json {
+        proxy_pass http://127.0.0.1:8000/openapi.json;
+    }
+
+    # WebSocket for live logs
+    location /api/simulations/ {
+        proxy_pass http://127.0.0.1:8000/api/simulations/;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+    }
+}
+```
