@@ -4,12 +4,15 @@ WORKDIR /app
 
 COPY package.json package-lock.json* ./
 
-# --ignore-scripts avoids spawn sh EACCES, then we run scripts manually
+# --ignore-scripts avoids spawn sh EACCES on Proxmox Docker
 RUN npm install --legacy-peer-deps --ignore-scripts && \
     npm rebuild esbuild 2>/dev/null || true
 
 COPY . .
-RUN npm run build
+
+# Build with network isolation workaround for Proxmox Docker
+ENV VITE_API_BASE=/api
+RUN npx vite build 2>&1 || npx vite build --mode production
 
 FROM nginx:1.25-alpine
 
