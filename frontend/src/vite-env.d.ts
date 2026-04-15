@@ -1,2 +1,2 @@
-"""Vite environment types."""
+// Vite environment types
 /// <reference types="vite/client" />
