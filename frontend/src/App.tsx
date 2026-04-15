@@ -7,7 +7,6 @@ import {
   type SimulationDetail,
   type ProfileInfo,
   type ConnectivityResult,
-  createLogStream,
 } from './api'
 import SimulationCard from './components/SimulationCard'
 import ControlPanel from './components/ControlPanel'

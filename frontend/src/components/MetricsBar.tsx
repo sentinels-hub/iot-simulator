@@ -6,7 +6,7 @@ interface Props {
   status: string
 }
 
-export default function MetricsBar({ simId, status }: Props) {
+export default function MetricsBar({ simId, status: _status }: Props) {
   const [metrics, setMetrics] = useState<MetricsData | null>(null)
 
   useEffect(() => {
