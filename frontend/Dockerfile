@@ -1,4 +1,4 @@
-FROM node:20-bookworm-slim AS build
+FROM node:22-bookworm-slim AS build
 
 WORKDIR /app
 
@@ -10,9 +10,9 @@ RUN npm install --legacy-peer-deps --ignore-scripts && \
 
 COPY . .
 
-# Build with network isolation workaround for Proxmox Docker
+# Build frontend
 ENV VITE_API_BASE=/api
-RUN npx vite build 2>&1 || npx vite build --mode production
+RUN npx vite build
 
 FROM nginx:1.25-alpine
 
