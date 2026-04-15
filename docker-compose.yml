@@ -4,6 +4,8 @@ services:
       context: ./backend
       dockerfile: Dockerfile
     container_name: iot-simulator-backend
+    security_opt:
+      - seccomp:unconfined
     ports:
       - "8000:8000"
     volumes:
