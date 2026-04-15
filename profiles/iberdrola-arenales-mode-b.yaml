@@ -1,0 +1,82 @@
+# Iberdrola Arenales — Mode B: Direct ThingsBoard PE
+#
+# Simulates BSEC telemetry connecting directly to ThingsBoard PE.
+# Uses gateway access token as MQTT username (set via IBERDROLA_GATEWAY_TOKEN env).
+
+name: "iberdrola-arenales-mode-b"
+
+transport:
+  mode: "tb_direct"
+
+  mosquitto:
+    mqtt_host: "gw-lora-0001.iberdrola-arenales-26.sentinels.pro"
+    mqtt_port: 443
+    mqtt_use_tls: true
+    mqtt_websocket_path: "/mqtt"
+    mqtt_protocol: "websockets"
+    client_id: "gw-simulator-001"
+    mqtt_username: ""
+    mqtt_password: ""
+    mosquitto_topic: "gw-lora-0001/bme680"
+
+  tb_direct:
+    tb_host: "aiot.sentinels.pro"
+    tb_port: 443
+    tb_use_tls: true
+    tb_token: ""  # Set via IBERDROLA_GATEWAY_TOKEN env var
+    tb_topic: "v1/gateway/telemetry"
+
+gateway:
+  name: "gw-iot-direct-ingest"
+  type: "default"
+
+devices:
+  count: 50
+  prefix: "BME680_SN_"
+  serial_prefix: "0000000000"
+  models:
+    - name: "Nordic"
+      weight: 0.8
+      perfil: "ULP"
+    - name: "ESP32"
+      weight: 0.2
+      perfil: "standard"
+
+telemetry:
+  interval_seconds: 30
+  keys:
+    - temperature
+    - pressure
+    - humidity
+    - gas_resistance
+    - gas_index
+    - battery_voltage
+  ranges:
+    temperature:
+      min: 15.0
+      max: 50.0
+      drift: 0.5
+    pressure:
+      min: 950.0
+      max: 1050.0
+      drift: 1.0
+    humidity:
+      min: 10.0
+      max: 95.0
+      drift: 2.0
+    gas_resistance:
+      min: 1000.0
+      max: 15000000.0
+      drift: 50000.0
+    gas_index:
+      min: 0
+      max: 500
+      drift: 5
+    battery_voltage:
+      min: 3.0
+      max: 4.2
+      drift: 0.01
+
+schedule:
+  mode: "duration"
+  duration_minutes: 60

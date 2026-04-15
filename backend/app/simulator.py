@@ -1,10 +1,14 @@
-"""Simulation engine — manages device pools and telemetry cycles."""
+"""Simulation engine — manages device pools and telemetry cycles.
+
+Orchestrates SimulatedDevices and MQTT transport lifecycle.
+Handles start/stop/pause/resume and provides status reporting.
+"""
 
 import asyncio
 import logging
 import time
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Optional, Union
 from uuid import uuid4
 
 from .devices import SimulatedDevice, create_device_pool
@@ -28,17 +32,18 @@ class SimulationEngine:
         self.id = str(uuid4())[:8]
         self.state = SimulationState(id=self.id, profile=profile)
         self.devices: list[SimulatedDevice] = []
-        self.transport: Optional[MosquittoTransport | TbDirectTransport] = None
+        self.transport: Optional[Union[MosquittoTransport, TbDirectTransport]] = None
         self._running = False
+        self._paused = False
         self._task: Optional[asyncio.Task] = None
 
     def initialize(self) -> bool:
         """Create device pool and initialize transport."""
-        # Create devices
         self.devices = create_device_pool(self.profile.devices, self.profile.telemetry)
         self.state.devices_active = len(self.devices)
         logger.info(
-            f"Initialized {len(self.devices)} devices for simulation '{self.profile.name}'"
+            f"[{self.id}] Initialized {len(self.devices)} devices "
+            f"for simulation '{self.profile.name}'"
         )
 
         # Initialize transport based on mode
@@ -47,7 +52,9 @@ class SimulationEngine:
         elif self.profile.transport.mode == TransportMode.TB_DIRECT:
             self.transport = TbDirectTransport(self.profile.transport.tb_direct)
         else:
-            logger.error(f"Unknown transport mode: {self.profile.transport.mode}")
+            logger.error(
+                f"[{self.id}] Unknown transport mode: {self.profile.transport.mode}"
+            )
             return False
 
         return True
@@ -55,7 +62,7 @@ class SimulationEngine:
     async def start(self) -> bool:
         """Connect transport and start telemetry loop."""
         if self._running:
-            logger.warning("Simulation already running")
+            logger.warning(f"[{self.id}] Simulation already running")
             return False
 
         if not self.transport:
@@ -65,52 +72,86 @@ class SimulationEngine:
         # Connect transport
         connected = self.transport.connect()
         if not connected:
-            self.state.status = SimulationStatus.ERROR
-            self.state.errors.append("Failed to connect MQTT transport")
-            return False
+            # Give it a brief moment — connect() starts loop_start but
+            # the on_connect callback needs a moment
+            await asyncio.sleep(1.0)
+            if not self.transport.connected:
+                self.state.status = SimulationStatus.ERROR
+                error_msg = "Failed to connect MQTT transport"
+                self.state.errors.append(error_msg)
+                self._log(error_msg)
+                return False
 
         self._running = True
+        self._paused = False
         self.state.status = SimulationStatus.RUNNING
         self.state.started_at = datetime.now(timezone.utc)
+        self._log(
+            f"Simulation started — {len(self.devices)} devices, interval {self.profile.telemetry.interval_seconds}s"
+        )
+        logger.info(
+            f"[{self.id}] Simulation '{self.profile.name}' started — "
+            f"sending telemetry every {self.profile.telemetry.interval_seconds}s"
+        )
 
         # Start telemetry loop
         self._task = asyncio.create_task(self._telemetry_loop())
-        logger.info(
-            f"Simulation '{self.profile.name}' started — sending telemetry every {self.profile.telemetry.interval_seconds}s"
-        )
         return True
 
     async def stop(self):
         """Stop the simulation and disconnect transport."""
         self._running = False
+        self._paused = False
         if self._task:
             self._task.cancel()
             try:
                 await self._task
             except asyncio.CancelledError:
                 pass
+            self._task = None
 
         if self.transport:
             self.transport.disconnect()
 
         self.state.status = SimulationStatus.STOPPED
         self.state.stopped_at = datetime.now(timezone.utc)
+        self._log(
+            f"Simulation stopped — sent {self.state.messages_sent} messages total"
+        )
         logger.info(
-            f"Simulation '{self.profile.name}' stopped — sent {self.state.messages_sent} messages"
+            f"[{self.id}] Simulation '{self.profile.name}' stopped — "
+            f"sent {self.state.messages_sent} messages"
         )
 
     async def pause(self):
         """Pause telemetry sending (keep MQTT connection alive)."""
+        if not self._running:
+            logger.warning(f"[{self.id}] Cannot pause — not running")
+            return
         self._running = False
+        self._paused = True
+        if self._task:
+            self._task.cancel()
+            try:
+                await self._task
+            except asyncio.CancelledError:
+                pass
+            self._task = None
         self.state.status = SimulationStatus.PAUSED
-        logger.info(f"Simulation '{self.profile.name}' paused")
+        self._log("Simulation paused")
+        logger.info(f"[{self.id}] Simulation '{self.profile.name}' paused")
 
     async def resume(self):
         """Resume paused simulation."""
+        if not self._paused:
+            logger.warning(f"[{self.id}] Cannot resume — not paused")
+            return
         self._running = True
+        self._paused = False
         self.state.status = SimulationStatus.RUNNING
         self._task = asyncio.create_task(self._telemetry_loop())
-        logger.info(f"Simulation '{self.profile.name}' resumed")
+        self._log("Simulation resumed")
+        logger.info(f"[{self.id}] Simulation '{self.profile.name}' resumed")
 
     async def _telemetry_loop(self):
         """Main telemetry sending loop."""
@@ -130,8 +171,12 @@ class SimulationEngine:
             if duration_seconds:
                 elapsed = time.time() - start_time
                 if elapsed >= duration_seconds:
+                    self._log(
+                        f"Duration reached ({self.profile.schedule.duration_minutes}min)"
+                    )
                     logger.info(
-                        f"Simulation duration reached ({self.profile.schedule.duration_minutes}min)"
+                        f"[{self.id}] Simulation duration reached "
+                        f"({self.profile.schedule.duration_minutes}min)"
                     )
                     await self.stop()
                     return
@@ -141,6 +186,7 @@ class SimulationEngine:
     def _send_all_devices(self):
         """Send telemetry from all devices based on transport mode."""
         if not self.transport or not self.transport.connected:
+            self._log("Transport not connected — skipping telemetry cycle")
             return
 
         if self.profile.transport.mode == TransportMode.MOSQUITTO_VIA_NGINX:
@@ -152,16 +198,15 @@ class SimulationEngine:
                     self.state.messages_sent += 1
                     self.state.last_telemetry = payload
                 else:
-                    self.state.errors.append(
-                        f"Failed to publish for device {device.name}"
-                    )
+                    error_msg = f"Failed to publish for device {device.name}"
+                    self.state.errors.append(error_msg)
+                    self._log(error_msg)
 
         elif self.profile.transport.mode == TransportMode.TB_DIRECT:
             # Mode B: Bundle all devices in a single gateway telemetry message
             devices_payload: dict[str, list[dict]] = {}
             ts = int(datetime.now(timezone.utc).timestamp() * 1000)
 
-            gateway_values = {}
             for device in self.devices:
                 values = device.to_tb_values()
                 devices_payload[device.name] = [{"ts": ts, "values": values}]
@@ -174,7 +219,9 @@ class SimulationEngine:
                 self.state.messages_sent += len(self.devices)
                 self.state.last_telemetry = devices_payload
             else:
-                self.state.errors.append("Failed to publish gateway telemetry to TB PE")
+                error_msg = "Failed to publish gateway telemetry to TB PE"
+                self.state.errors.append(error_msg)
+                self._log(error_msg)
 
     def get_status(self) -> dict:
         """Get current simulation status."""
@@ -191,8 +238,16 @@ class SimulationEngine:
             "stopped_at": self.state.stopped_at.isoformat()
             if self.state.stopped_at
             else None,
-            "errors": self.state.errors[-10:],  # Last 10 errors
+            "errors": self.state.errors[-10:],
             "last_telemetry_preview": str(self.state.last_telemetry)[:200]
             if self.state.last_telemetry
             else None,
         }
+
+    def _log(self, message: str):
+        """Append a timestamped log entry to the simulation state."""
+        timestamp = datetime.now(timezone.utc).isoformat()
+        self.state.logs.append(f"[{timestamp}] {message}")
+        # Keep only last 1000 entries to prevent memory bloat
+        if len(self.state.logs) > 1000:
+            self.state.logs = self.state.logs[-500:]

@@ -5,18 +5,27 @@ Publishes BSEC telemetry in the format consumed by TB Gateway's converter.
 
 Auth: Anonymous (ClientID only, no username/password)
 Topic: gw-lora-XXXX/bme680 (configurable)
+
+Uses paho-mqtt v2 API with CallbackAPIVersion.VERSION2.
+Reconnect logic: on unexpected disconnect, retry every 5s up to 10 times.
 """
 
 import json
-import ssl
 import logging
+import ssl
+import threading
+import time
 from typing import Optional
 
 import paho.mqtt.client as mqtt
+from paho.mqtt.enums import CallbackAPIVersion
 
 from ..models import MosquittoViaNginxConfig
 
 logger = logging.getLogger(__name__)
+
+MAX_RECONNECT_ATTEMPTS = 10
+RECONNECT_DELAY_SECONDS = 5
 
 
 class MosquittoTransport:
@@ -27,23 +36,23 @@ class MosquittoTransport:
         self.client: Optional[mqtt.Client] = None
         self.connected = False
         self._message_count = 0
+        self._reconnect_attempts = 0
+        self._reconnect_lock = threading.Lock()
 
     def connect(self) -> bool:
         """Establish MQTT connection to Mosquitto via Nginx."""
-        protocol = mqtt.MQTTv311
+        # paho-mqtt v2: requires CallbackAPIVersion.VERSION2
         if self.config.mqtt_protocol.value == "websockets":
-            # WebSocket transport through Nginx on port 443
             self.client = mqtt.Client(
+                callback_api_version=CallbackAPIVersion.VERSION2,
                 client_id=self.config.client_id,
-                protocol=protocol,
                 transport="websockets",
             )
             self.client.ws_set_options(path=self.config.mqtt_websocket_path)
         else:
-            # Direct TCP (internal network only)
             self.client = mqtt.Client(
+                callback_api_version=CallbackAPIVersion.VERSION2,
                 client_id=self.config.client_id,
-                protocol=protocol,
                 transport="tcp",
             )
 
@@ -54,12 +63,13 @@ class MosquittoTransport:
             )
             self.client.tls_insecure_set(False)
 
-        # Anonymous auth — no username/password
+        # Anonymous auth — no username/password unless configured
         if self.config.mqtt_username:
             self.client.username_pw_set(
                 self.config.mqtt_username, self.config.mqtt_password
             )
 
+        # v2 callback signatures: (client, userdata, flags, reason_code, properties)
         self.client.on_connect = self._on_connect
         self.client.on_disconnect = self._on_disconnect
         self.client.on_publish = self._on_publish
@@ -106,17 +116,60 @@ class MosquittoTransport:
     def message_count(self) -> int:
         return self._message_count
 
-    def _on_connect(self, client, userdata, flags, rc):
-        if rc == 0:
+    # ─── paho-mqtt v2 callbacks ────────────────────────────────────────────
+
+    def _on_connect(self, client, userdata, flags, reason_code, properties=None):
+        """v2 on_connect callback — reason_code is 0 on success."""
+        if reason_code == 0 or str(reason_code) == "Success":
             self.connected = True
+            self._reconnect_attempts = 0
             logger.info(f"Connected to Mosquitto at {self.config.mqtt_host}")
         else:
-            logger.error(f"Mosquitto connection failed with rc={rc}")
+            logger.error(f"Mosquitto connection failed: reason_code={reason_code}")
 
-    def _on_disconnect(self, client, userdata, rc):
+    def _on_disconnect(
+        self, client, userdata, flags, reason_code=None, properties=None
+    ):
+        """v2 on_disconnect callback — auto-reconnect on unexpected disconnect."""
         self.connected = False
-        if rc != 0:
-            logger.warning(f"Unexpected Mosquitto disconnect: rc={rc}")
+        if reason_code != 0 and reason_code is not None:
+            logger.warning(
+                f"Unexpected Mosquitto disconnect: reason_code={reason_code}"
+            )
+            self._attempt_reconnect()
 
-    def _on_publish(self, client, userdata, mid):
+    def _on_publish(self, client, userdata, mid, reason_code=None, properties=None):
         logger.debug(f"Message {mid} published successfully")
+
+    # ─── Reconnect logic ───────────────────────────────────────────────────
+
+    def _attempt_reconnect(self):
+        """Attempt reconnection with exponential backoff."""
+        with self._reconnect_lock:
+            if self._reconnect_attempts >= MAX_RECONNECT_ATTEMPTS:
+                logger.error(
+                    f"Max reconnect attempts ({MAX_RECONNECT_ATTEMPTS}) reached — giving up"
+                )
+                return
+
+            self._reconnect_attempts += 1
+            attempt = self._reconnect_attempts
+            logger.info(f"Reconnect attempt {attempt}/{MAX_RECONNECT_ATTEMPTS}...")
+
+        # Reconnect in background thread to avoid blocking
+        threading.Thread(
+            target=self._reconnect_worker,
+            args=(attempt,),
+            daemon=True,
+        ).start()
+
+    def _reconnect_worker(self, attempt: int):
+        """Background reconnect worker."""
+        time.sleep(RECONNECT_DELAY_SECONDS)
+        try:
+            if self.client:
+                self.client.reconnect()
+                logger.info(f"Reconnected to Mosquitto on attempt {attempt}")
+        except Exception as e:
+            logger.error(f"Reconnect attempt {attempt} failed: {e}")
+            self._attempt_reconnect()
