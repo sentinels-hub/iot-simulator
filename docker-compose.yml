@@ -4,6 +4,8 @@ services:
       context: ./frontend
       dockerfile: Dockerfile
     container_name: iot-simulator-frontend
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     ports:
       - "8080:80"
     restart: unless-stopped
