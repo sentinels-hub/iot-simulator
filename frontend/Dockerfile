@@ -3,6 +3,9 @@ FROM node:20-bookworm-slim AS build
 WORKDIR /app
 
 COPY package.json package-lock.json* ./
+
+# Pre-install esbuild binary to avoid spawn sh EACCES in postinstall
+RUN npm install esbuild --no-save --legacy-peer-deps || true
 RUN npm install --legacy-peer-deps
 
 COPY . .
