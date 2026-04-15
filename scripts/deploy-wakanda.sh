@@ -1,28 +1,36 @@
 #!/bin/bash
 set -euo pipefail
 
-# deploy-wakanda.sh — Deploy IoT Gateway Simulator to Wakanda via SSH
+# deploy-wakanda.sh — Deploy IoT Gateway Simulator to Wakanda (Proxmox)
+#
+# Architecture on Wakanda:
+#   - Backend: Python/FastAPI as systemd service (Docker has socketpair issues on Proxmox)
+#   - Frontend: React build served by host nginx
+#   - No Docker containers needed at runtime
 #
 # Usage:
-#   ./scripts/deploy-wakanda.sh              # Full deploy (build + start + health)
-#   ./scripts/deploy-wakanda.sh status        # Check deployment status
-#   ./scripts/deploy-wakanda.sh stop          # Stop containers
-#   ./scripts/deploy-wakanda.sh logs          # Tail container logs
-#   ./scripts/deploy-wakanda.sh restart       # Restart containers
+#   ./scripts/deploy-wakanda.sh              # Full deploy
+#   ./scripts/deploy-wakanda.sh status        # Check status
+#   ./scripts/deploy-wakanda.sh stop          # Stop backend
+#   ./scripts/deploy-wakanda.sh logs          # Tail backend logs
+#   ./scripts/deploy-wakanda.sh restart       # Restart backend
 #   ./scripts/deploy-wakanda.sh smoke         # Run E2E smoke test
 #
-# Requires: SSH access to Wakanda (ssh wakanda or via WAKANDA_SSH env)
-# Requires: .env file with IBERDROLA_GATEWAY_TOKEN
+# Prerequisites:
+#   - SSH access: ssh wakanda (or set WAKANDA_SSH)
+#   - Node.js 22+ on Wakanda (for frontend build)
+#   - Python 3.12+ on Wakanda (for backend venv)
+#   - nginx on Wakanda (for frontend serving + API proxy)
 
 # ─── Configuration ─────────────────────────────────────────────────────
 
 REMOTE_HOST="${WAKANDA_SSH:-wakanda}"
-REMOTE_USER="$(ssh -G "$REMOTE_HOST" 2>/dev/null | grep '^user ' | awk '{print $2}' || echo 'agentops')"
 REMOTE_DIR="/opt/iot-simulator"
 REPO_URL="https://github.com/sentinels-hub/iot-simulator.git"
 BRANCH="main"
-MAX_HEALTH_RETRIES=30
-HEALTH_INTERVAL=2
+SERVICE_NAME="iot-simulator"
+NGINX_SITE="iot-sim.sentinels.pro"
+WWW_DIR="/var/www/iot-sim"
 
 # ─── Colors ─────────────────────────────────────────────────────────────
 
@@ -39,31 +47,22 @@ fail()  { echo -e "${RED}[FAIL]${NC}  $*"; exit 1; }
 
 # ─── SSH helper ─────────────────────────────────────────────────────────
 
-ssh_cmd() {
+run() {
     ssh -o ConnectTimeout=10 "$REMOTE_HOST" "$@"
-}
-
-scp_to() {
-    scp -o ConnectTimeout=10 "$1" "$REMOTE_HOST:$2"
 }
 
 # ─── Pre-flight ─────────────────────────────────────────────────────────
 
 preflight() {
     info "Checking SSH connectivity to $REMOTE_HOST..."
-    if ! ssh_cmd "echo ok" >/dev/null 2>&1; then
-        fail "Cannot SSH to $REMOTE_HOST. Check your SSH config."
-    fi
+    run "echo ok" >/dev/null 2>&1 || fail "Cannot SSH to $REMOTE_HOST"
     ok "SSH connected"
 
-    info "Checking Docker on remote..."
-    if ! ssh_cmd "docker --version" >/dev/null 2>&1; then
-        fail "Docker not installed on remote host."
-    fi
-    if ! ssh_cmd "docker compose version" >/dev/null 2>&1; then
-        fail "Docker Compose not installed on remote host."
-    fi
-    ok "Docker + Compose available"
+    info "Checking prerequisites on remote..."
+    run "python3 --version" >/dev/null 2>&1 || fail "Python 3 not installed"
+    run "node --version" >/dev/null 2>&1 || fail "Node.js not installed"
+    run "nginx -v" >/dev/null 2>&1 || fail "nginx not installed"
+    ok "Prerequisites met"
 }
 
 # ─── Deploy ─────────────────────────────────────────────────────────────
@@ -73,7 +72,7 @@ deploy() {
 
     # 1. Clone or update repo
     info "Syncing repository to $REMOTE_DIR..."
-    ssh_cmd "if [ -d '$REMOTE_DIR/.git' ]; then
+    run "if [ -d '$REMOTE_DIR/.git' ]; then
         cd $REMOTE_DIR && git fetch origin && git reset --hard origin/$BRANCH
     else
         sudo rm -rf $REMOTE_DIR
@@ -83,168 +82,197 @@ deploy() {
 
     # 2. Ensure .env exists
     info "Checking .env configuration..."
-    if ! ssh_cmd "test -f $REMOTE_DIR/.env"; then
+    if ! run "test -f $REMOTE_DIR/.env"; then
         if [ -f ".env" ]; then
             info "Uploading local .env..."
-            scp_to ".env" "$REMOTE_DIR/.env"
+            scp -o ConnectTimeout=10 ".env" "$REMOTE_HOST:$REMOTE_DIR/.env"
         else
-            warn "No .env found. Creating from .env.example (you MUST set IBERDROLA_GATEWAY_TOKEN)"
-            ssh_cmd "cp $REMOTE_DIR/.env.example $REMOTE_DIR/.env"
+            warn "No .env found. Creating from .env.example"
+            run "cp $REMOTE_DIR/.env.example $REMOTE_DIR/.env"
         fi
     fi
     ok ".env ready"
 
-    # 3. Build containers
-    info "Building Docker containers..."
-    ssh_cmd "cd $REMOTE_DIR && docker compose build --quiet" 2>&1 || \
-    ssh_cmd "cd $REMOTE_DIR && docker compose build"
-    ok "Containers built"
+    # 3. Setup Python venv and install deps
+    info "Setting up Python backend..."
+    run "cd $REMOTE_DIR && \
+        python3 -m venv .venv && \
+        .venv/bin/pip install -q --upgrade pip && \
+        .venv/bin/pip install -q -r backend/requirements.txt"
+    ok "Backend dependencies installed"
 
-    # 4. Start containers
-    info "Starting containers..."
-    ssh_cmd "cd $REMOTE_DIR && docker compose down --remove-orphans 2>/dev/null; docker compose up -d"
-    ok "Containers started"
+    # 4. Build frontend natively
+    info "Building frontend..."
+    run "cd $REMOTE_DIR/frontend && \
+        npm install --legacy-peer-deps 2>/dev/null && \
+        VITE_API_BASE=/api npx vite build"
+    ok "Frontend built"
 
-    # 5. Health check
+    # 5. Deploy frontend to nginx
+    info "Deploying frontend to $WWW_DIR..."
+    run "sudo rm -rf $WWW_DIR && \
+        sudo mkdir -p $WWW_DIR && \
+        sudo cp -r $REMOTE_DIR/frontend/dist/* $WWW_DIR/ && \
+        sudo chown -R www-data:www-data $WWW_DIR"
+    ok "Frontend deployed to nginx"
+
+    # 6. Configure nginx site
+    info "Configuring nginx..."
+    run "if [ ! -f /etc/nginx/sites-available/$NGINX_SITE ]; then
+        echo 'ERROR: nginx site config not found at /etc/nginx/sites-available/$NGINX_SITE'
+        echo 'Create it first with the correct proxy configuration.'
+        exit 1
+    fi
+    sudo ln -sf /etc/nginx/sites-available/$NGINX_SITE /etc/nginx/sites-enabled/$NGINX_SITE
+    sudo rm -f /etc/nginx/sites-enabled/default
+    sudo nginx -t && sudo systemctl reload nginx"
+    ok "nginx configured"
+
+    # 7. Install systemd service
+    info "Installing systemd service..."
+    run "cat > /tmp/iot-simulator.service << 'SVCEOF'
+[Unit]
+Description=IoT Gateway Simulator Backend
+After=network.target
+
+[Service]
+Type=simple
+User=agentops
+WorkingDirectory=$REMOTE_DIR/backend
+ExecStart=$REMOTE_DIR/.venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8000
+Restart=always
+RestartSec=5
+Environment=SIMULATOR_HOST=0.0.0.0
+Environment=SIMULATOR_PORT=8000
+Environment=SIMULATOR_LOG_LEVEL=info
+Environment=PROFILES_DIR=$REMOTE_DIR/profiles
+EnvironmentFile=$REMOTE_DIR/.env
+
+[Install]
+WantedBy=multi-user.target
+SVCEOF
+    sudo cp /tmp/iot-simulator.service /etc/systemd/system/$SERVICE_NAME.service && \
+    sudo systemctl daemon-reload && \
+    sudo systemctl enable $SERVICE_NAME && \
+    sudo systemctl restart $SERVICE_NAME"
+    ok "systemd service installed"
+
+    # 8. Wait for health
     info "Waiting for backend health..."
     RETRY=0
-    until ssh_cmd "curl -sf http://localhost:8000/api/health" >/dev/null 2>&1; do
+    until run "curl -sf http://localhost:8000/api/health" >/dev/null 2>&1; do
         RETRY=$((RETRY + 1))
-        if [ $RETRY -ge $MAX_HEALTH_RETRIES ]; then
-            fail "Backend health check failed after ${MAX_HEALTH_RETRIES} retries"
-            ssh_cmd "cd $REMOTE_DIR && docker compose logs backend --tail=30"
+        if [ $RETRY -ge 15 ]; then
+            fail "Backend health check failed after 15 retries"
+            run "sudo journalctl -u $SERVICE_NAME --no-pager -n 20"
         fi
-        echo "  Waiting... ($RETRY/${MAX_HEALTH_RETRIES})"
-        sleep $HEALTH_INTERVAL
+        echo "  Waiting... ($RETRY/15)"
+        sleep 2
     done
     ok "Backend healthy"
-
-    # 6. Verify frontend
-    info "Checking frontend..."
-    if ssh_cmd "curl -sf -o /dev/null http://localhost:8080" 2>/dev/null; then
-        ok "Frontend serving on port 8080"
-    else
-        warn "Frontend not responding on port 8080 yet (may need a moment)"
-    fi
 
     echo ""
     echo -e "${GREEN}════════════════════════════════════════════════════${NC}"
     echo -e "${GREEN}  Deployment Successful!${NC}"
     echo -e "${GREEN}════════════════════════════════════════════════════${NC}"
     echo ""
-    echo "  Frontend:  http://iot-sim.sentinels.pro"
+    echo "  Frontend:  http://iot-sim.sentinels.pro (port 80)"
     echo "  Backend:   http://iot-sim.sentinels.pro/api/health"
     echo "  API Docs:  http://iot-sim.sentinels.pro/docs"
-    echo "  Remote:    ssh $REMOTE_HOST"
+    echo "  SSH:       ssh $REMOTE_HOST"
     echo "  Logs:      $0 logs"
+    echo "  Status:    $0 status"
     echo ""
 }
 
 # ─── Status ─────────────────────────────────────────────────────────────
 
 status() {
-    info "Checking deployment status on $REMOTE_HOST..."
+    info "Deployment status on $REMOTE_HOST..."
     echo ""
-    ssh_cmd "cd $REMOTE_DIR 2>/dev/null && {
-        echo '=== Containers ==='
-        docker compose ps -a 2>/dev/null
+    run "{
+        echo '=== Backend (systemd) ==='
+        sudo systemctl is-active $SERVICE_NAME 2>/dev/null || echo 'NOT RUNNING'
         echo ''
         echo '=== Health ==='
         curl -sf http://localhost:8000/api/health 2>/dev/null || echo 'Backend not responding'
         echo ''
-        echo '=== Frontend ==='
-        curl -sf -o /dev/null -w 'HTTP %{http_code}' http://localhost:8080 2>/dev/null || echo 'Frontend not responding'
+        echo '=== Profiles ==='
+        curl -sf http://localhost:8000/api/profiles 2>/dev/null | python3 -c 'import sys,json; d=json.load(sys.stdin); print(f\"{d[\"total\"]} profiles loaded\")' 2>/dev/null || echo 'Cannot load profiles'
+        echo ''
+        echo '=== Frontend (nginx) ==='
+        curl -sf -o /dev/null -w 'HTTP %{http_code}' http://localhost/ 2>/dev/null || echo 'Frontend not responding'
         echo ''
         echo '=== Disk ==='
         df -h / | tail -1
-    } || echo 'Repository not deployed at $REMOTE_DIR'"
+    }"
 }
 
 # ─── Stop ───────────────────────────────────────────────────────────────
 
 stop() {
-    info "Stopping containers on $REMOTE_HOST..."
-    ssh_cmd "cd $REMOTE_DIR && docker compose down"
-    ok "Containers stopped"
+    info "Stopping backend on $REMOTE_HOST..."
+    run "sudo systemctl stop $SERVICE_NAME"
+    ok "Backend stopped"
 }
 
 # ─── Logs ───────────────────────────────────────────────────────────────
 
 logs() {
-    ssh_cmd "cd $REMOTE_DIR && docker compose logs -f --tail=50 ${1:-}"
+    run "sudo journalctl -u $SERVICE_NAME -f --no-pager -n 50"
 }
 
 # ─── Restart ────────────────────────────────────────────────────────────
 
 restart() {
-    info "Restarting containers on $REMOTE_HOST..."
-    ssh_cmd "cd $REMOTE_DIR && docker compose restart"
-    ok "Containers restarted"
+    info "Restarting backend on $REMOTE_HOST..."
+    run "sudo systemctl restart $SERVICE_NAME"
+    sleep 3
+    run "curl -sf http://localhost:8000/api/health" >/dev/null 2>&1 && ok "Backend restarted and healthy" || warn "Backend restarted but not healthy yet"
 }
 
 # ─── Smoke test ─────────────────────────────────────────────────────────
 
 smoke() {
     info "Running E2E smoke test against $REMOTE_HOST..."
-
     local BASE="http://localhost:8000"
 
-    echo ""
-    echo -e "${BLUE}1. Health check${NC}"
+    echo -e "\n${BLUE}1. Health check${NC}"
     local health
-    health=$(ssh_cmd "curl -sf $BASE/api/health")
-    if echo "$health" | grep -q '"status":"ok"'; then
-        ok "Backend healthy: $health"
-    else
-        fail "Backend unhealthy: $health"
-    fi
+    health=$(run "curl -sf $BASE/api/health")
+    echo "$health" | grep -q '"ok"' && ok "Backend healthy" || fail "Backend unhealthy: $health"
 
-    echo ""
-    echo -e "${BLUE}2. List profiles${NC}"
+    echo -e "\n${BLUE}2. Profiles${NC}"
     local profiles
-    profiles=$(ssh_cmd "curl -sf $BASE/api/profiles")
+    profiles=$(run "curl -sf $BASE/api/profiles")
     local pcount
-    pcount=$(echo "$profiles" | python3 -c "import sys,json; print(len(json.load(sys.stdin).get('profiles',[])))" 2>/dev/null || echo "?")
-    ok "Found $pcount profiles"
+    pcount=$(echo "$profiles" | python3 -c "import sys,json; print(json.load(sys.stdin)['total'])" 2>/dev/null || echo "?")
+    ok "$pcount profiles loaded"
 
-    echo ""
-    echo -e "${BLUE}3. Create simulation (example-gateway)${NC}"
+    echo -e "\n${BLUE}3. Create simulation (example-gateway)${NC}"
     local sim
-    sim=$(ssh_cmd "curl -sf -XPOST '$BASE/api/simulations?profile=example-gateway'")
+    sim=$(run "curl -sf -XPOST '$BASE/api/simulations?profile=example-gateway'")
     local sim_id
-    sim_id=$(echo "$sim" | python3 -c "import sys,json; print(json.load(sys.stdin)['id'])" 2>/dev/null || echo "")
-    if [ -n "$sim_id" ]; then
-        ok "Simulation created: id=$sim_id"
-    else
-        fail "Failed to create simulation: $sim"
-    fi
+    sim_id=$(echo "$sim" | python3 -c "import sys,json; print(json.load(sys.stdin)['id'])" 2>/dev/null)
+    [ -n "$sim_id" ] && ok "Simulation created: $sim_id" || fail "Create failed: $sim"
 
-    echo ""
-    echo -e "${BLUE}4. List simulations${NC}"
-    local sims
-    sims=$(ssh_cmd "curl -sf $BASE/api/simulations")
-    local scount
-    scount=$(echo "$sims" | python3 -c "import sys,json; print(len(json.load(sys.stdin)))" 2>/dev/null || echo "?")
-    ok "Found $scount simulation(s)"
-
-    echo ""
-    echo -e "${BLUE}5. Get simulation detail${NC}"
+    echo -e "\n${BLUE}4. Get simulation${NC}"
     local detail
-    detail=$(ssh_cmd "curl -sf $BASE/api/simulations/$sim_id")
-    local sim_status
-    sim_status=$(echo "$detail" | python3 -c "import sys,json; print(json.load(sys.stdin)['status'])" 2>/dev/null || echo "?")
-    ok "Simulation status: $sim_status"
+    detail=$(run "curl -sf $BASE/api/simulations/$sim_id")
+    echo "$detail" | python3 -c "import sys,json; d=json.load(sys.stdin); print(f\"  Status: {d['status']}, Devices: {d['devices_active']}\")" 2>/dev/null
+    ok "Simulation detail retrieved"
 
-    echo ""
-    echo -e "${BLUE}6. Delete simulation${NC}"
-    ssh_cmd "curl -sf -XDELETE $BASE/api/simulations/$sim_id -o /dev/null -w '%{http_code}'" | grep -q "204" && \
-        ok "Simulation deleted" || warn "Delete returned non-204"
+    echo -e "\n${BLUE}5. Delete simulation${NC}"
+    run "curl -sf -XDELETE $BASE/api/simulations/$sim_id -o /dev/null -w '%{http_code}'" | grep -q "204" && \
+        ok "Deleted" || warn "Delete failed"
 
-    echo ""
-    echo -e "${BLUE}7. Frontend check${NC}"
-    local fstatus
-    fstatus=$(ssh_cmd "curl -sf -o /dev/null -w '%{http_code}' http://localhost:8080")
-    ok "Frontend HTTP $fstatus"
+    echo -e "\n${BLUE}6. Frontend${NC}"
+    run "curl -sf -o /dev/null -w '%{http_code}' http://localhost/" | grep -q "200" && \
+        ok "Frontend serving (HTTP 200)" || warn "Frontend not serving"
+
+    echo -e "\n${BLUE}7. API via nginx proxy${NC}"
+    run "curl -sf http://localhost/api/health" | grep -q '"ok"' && \
+        ok "nginx proxy working" || warn "nginx proxy not forwarding"
 
     echo ""
     echo -e "${GREEN}════════════════════════════════════════════════════${NC}"
@@ -260,17 +288,17 @@ case "$COMMAND" in
     deploy)  deploy  ;;
     status)  preflight && status ;;
     stop)    preflight && stop   ;;
-    logs)    preflight && logs "${2:-}" ;;
+    logs)    preflight && logs   ;;
     restart) preflight && restart ;;
     smoke)   preflight && smoke  ;;
     *)
         echo "Usage: $0 {deploy|status|stop|logs|restart|smoke}"
         echo ""
-        echo "  deploy   — Full deploy: clone/build/start/health (default)"
+        echo "  deploy   — Full deploy: clone/build/install/start (default)"
         echo "  status   — Check deployment status"
-        echo "  stop     — Stop containers"
-        echo "  logs     — Tail container logs (optional: service name)"
-        echo "  restart  — Restart containers"
+        echo "  stop     — Stop backend service"
+        echo "  logs     — Tail backend logs"
+        echo "  restart  — Restart backend service"
         echo "  smoke    — Run E2E smoke test"
         exit 1
         ;;
