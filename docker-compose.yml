@@ -28,7 +28,6 @@ services:
     build:
       context: ./frontend
       dockerfile: Dockerfile
-      network: host
     container_name: iot-simulator-frontend
     ports:
       - "8080:80"
