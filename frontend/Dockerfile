@@ -4,9 +4,9 @@ WORKDIR /app
 
 COPY package.json package-lock.json* ./
 
-# Pre-install esbuild binary to avoid spawn sh EACCES in postinstall
-RUN npm install esbuild --no-save --legacy-peer-deps || true
-RUN npm install --legacy-peer-deps
+# --ignore-scripts avoids spawn sh EACCES, then we run scripts manually
+RUN npm install --legacy-peer-deps --ignore-scripts && \
+    npm rebuild esbuild 2>/dev/null || true
 
 COPY . .
 RUN npm run build
