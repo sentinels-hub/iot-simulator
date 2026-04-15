@@ -1,0 +1,41 @@
+version: "3.8"
+
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: iot-simulator-backend
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./profiles:/app/profiles:ro
+      - simulator-data:/app/data
+    env_file:
+      - .env
+    environment:
+      - SIMULATOR_HOST=0.0.0.0
+      - SIMULATOR_PORT=8000
+    restart: unless-stopped
+    networks:
+      - simulator-net
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: iot-simulator-frontend
+    ports:
+      - "8080:80"
+    depends_on:
+      - backend
+    restart: unless-stopped
+    networks:
+      - simulator-net
+
+volumes:
+  simulator-data:
+
+networks:
+  simulator-net:
+    driver: bridge

@@ -1,0 +1,117 @@
+# Example Gateway Profile — Iberdrola Arenales 2026
+#
+# This profile simulates a field gateway sending BSEC telemetry
+# to ThingsBoard PE via the full Mosquitto + Nginx chain (Mode A).
+#
+# For direct TB PE connection (Mode B), change transport.mode to "tb_direct"
+# and set transport.tb_host / transport.tb_port / transport.tb_token.
+
+name: "iberdrola-arenales-26-gw0001"
+
+transport:
+  # Mode A: Via Mosquitto + Nginx (primary, realistic)
+  mode: "mosquitto_via_nginx"  # Options: "mosquitto_via_nginx", "tb_direct"
+
+  # Mosquitto via Nginx (Mode A)
+  mqtt_host: "gw-lora-0001.iberdrola-arenales-26.sentinels.pro"
+  mqtt_port: 443
+  mqtt_use_tls: true
+  mqtt_websocket_path: "/mqtt"
+  mqtt_protocol: "websockets"  # "websockets" or "tcp"
+  client_id: "gw-simulator-001"
+  mqtt_username: ""  # Anonymous — no auth needed for Mosquitto
+  mqtt_password: ""
+
+  # Direct TB PE (Mode B) — only used when transport.mode = "tb_direct"
+  tb_host: "aiot.sentinels.pro"
+  tb_port: 443
+  tb_use_tls: true
+  tb_token: ""  # Set via env var IBERDROLA_GATEWAY_TOKEN
+
+  # Publish topics (Mode A)
+  mosquitto_topic: "gw-lora-0001/bme680"
+
+  # Publish topics (Mode B)
+  tb_topic: "v1/gateway/telemetry"
+
+gateway:
+  # Gateway identity in ThingsBoard
+  name: "gw-iot-direct-ingest"
+  type: "default"  # ThingsBoard device type
+
+devices:
+  count: 50
+  prefix: "BME680_SN_"
+  serial_prefix: "0000000000"
+  # SerialNumber format: {serial_prefix}{index_hex}
+  # e.g., 0000000000001C, 0000000000002C, etc.
+  models:
+    - name: "Nordic"
+      weight: 0.8  # 80% of devices are Nordic
+      perfil: "ULP"
+    - name: "ESP32"
+      weight: 0.2  # 20% are ESP32
+      perfil: "standard"
+
+telemetry:
+  interval_seconds: 30
+  keys:
+    - temperature   # °C, range 15-50, drift ±0.5
+    - pressure       # hPa, range 950-1050, drift ±1.0
+    - humidity        # %RH, range 10-95, drift ±2.0
+    - gas_resistance  # Ω, range 1000-15000000, variable drift
+    - gas_index       # IAQ 0-500, drift ±5
+    - battery_voltage # V, range 3.0-4.2, drift ±0.01 (slow drain)
+
+  # BSEC-specific realistic ranges
+  ranges:
+    temperature:
+      min: 15.0
+      max: 50.0
+      drift: 0.5
+    pressure:
+      min: 950.0
+      max: 1050.0
+      drift: 1.0
+    humidity:
+      min: 10.0
+      max: 95.0
+      drift: 2.0
+    gas_resistance:
+      min: 1000.0
+      max: 15000000.0
+      drift: 50000.0
+    gas_index:
+      min: 0
+      max: 500
+      drift: 5
+    battery_voltage:
+      min: 3.0
+      max: 4.2
+      drift: 0.01
+
+schedule:
+  mode: "duration"  # "duration" or "infinite"
+  duration_minutes: 60
+
+# Mosquitto payload template (Mode A)
+# This is what gets published to gw-lora-0001/bme680
+mosquitto_payload_template:
+  SerialNumber: "{serial_number}"
+  Temperature: "{temperature}"
+  Pressure: "{pressure}"
+  Humidity: "{humidity}"
+  Gas_resist: "{gas_resistance}"
+  Gas_index: "{gas_index}"
+  Time_stamp: "{timestamp_ms}"
+  Voltaje_bateria: "{battery_voltage}"
+  model: "{model}"
+  Perfil: "{perfil}"
+  Ciclo: "{cycle}"
+
+# ThingsBoard gateway payload template (Mode B)
+# This is what gets published to v1/gateway/telemetry
+tb_payload_template:
+  gateway_name: "{gateway_name}"
+  device_prefix: "{device_prefix}"
+  # TB auto-creates child devices from telemetry keys
