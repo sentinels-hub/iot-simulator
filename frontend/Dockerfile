@@ -1,9 +1,6 @@
-FROM node:20-alpine AS build
+FROM node:20-bookworm-slim AS build
 
 WORKDIR /app
-
-# Fix EACCES on Alpine — esbuild postinstall needs exec permission
-RUN apk add --no-cache python3 make g++
 
 COPY package.json package-lock.json* ./
 RUN npm install --legacy-peer-deps
