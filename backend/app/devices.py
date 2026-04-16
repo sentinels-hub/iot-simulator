@@ -1,34 +1,34 @@
 """Device factory — generates simulated Wingman BSEC devices.
 
-Creates devices with realistic telemetry drift based on BSEC output ranges.
+Creates devices with realistic telemetry drift based on BSEC output ranges
+observed from real field devices at Iberdrola Arenales.
 Each device maintains state between ticks for gradual, realistic variation.
 """
 
 import random
-import uuid
 from datetime import datetime, timezone
 
 from .models import DeviceConfig, DeviceModelConfig, TelemetryConfig, TelemetryKeyRange
 
 
-# BSEC realistic value ranges per telemetry key
+# BSEC realistic value ranges — tuned from real Wingman field data (Arenales)
 BSEC_RANGES: dict[str, tuple[float, float]] = {
-    "temperature": (15.0, 50.0),  # °C ambient
-    "pressure": (950.0, 1050.0),  # hPa
-    "humidity": (10.0, 95.0),  # %RH
-    "gas_resistance": (1000.0, 15000000.0),  # Ω — huge range
-    "gas_index": (0, 500),  # IAQ index
-    "battery_voltage": (3.0, 4.2),  # V
+    "temperature": (28.0, 45.0),  # °C — field readings 33-37°C, allow wider
+    "pressure": (970.0, 985.0),  # hPa — very stable around 976
+    "humidity": (15.0, 35.0),  # %RH — field 20-23%, inverse to temp
+    "gas_resistance": (50000.0, 15000000.0),  # Ω — enormous variance
+    "gas_index": (0, 500),  # IAQ index — incrementing counter
+    "battery_voltage": (3.5, 4.2),  # V — starts near 4.17
 }
 
-# Per-key drift (max random walk per tick)
+# Per-key drift — realistic BSEC sensor walk per reading
 BSEC_DRIFT: dict[str, float] = {
-    "temperature": 0.5,  # ±0.5°C
-    "pressure": 1.0,  # ±1 hPa
-    "humidity": 2.0,  # ±2%RH
-    "gas_resistance": 50000.0,  # ±50kΩ (wide range)
-    "gas_index": 5,  # ±5 IAQ
-    "battery_voltage": 0.01,  # ±0.01V (slow drain)
+    "temperature": 0.15,  # ±0.15°C per reading (gradual thermal drift)
+    "pressure": 0.02,  # ±0.02 hPa (barometric pressure very stable)
+    "humidity": 0.25,  # ±0.25%RH (slow inverse-correlation with temp)
+    "gas_resistance": 0.0,  # Handled with log-scale multiplier
+    "gas_index": 0,  # Always increments by 1
+    "battery_voltage": 0.002,  # ±0.002V (very slow drain)
 }
 
 
@@ -36,8 +36,7 @@ class SimulatedDevice:
     """A single simulated Wingman device with persistent state.
 
     Maintains current sensor values and applies realistic drift per tick.
-    Generates BSEC-compatible telemetry payloads in both Mosquitto and
-    ThingsBoard gateway formats.
+    Payload format matches real BSEC field output from Arenales devices.
     """
 
     def __init__(
@@ -51,13 +50,17 @@ class SimulatedDevice:
         self.serial_number = f"{config.serial_prefix}{index:X}"
         self.telemetry_keys = telemetry_config.keys
         self.ranges = telemetry_config.ranges
-        self.cycle = random.randint(1, 100)  # Start at random cycle
+        self.cycle = random.randint(100, 300)  # Start at realistic cycle count
 
         # Pick device model based on weights
         self.model = self._pick_model(config.models)
         self.perfil = self.model.perfil
 
-        # Initialize with random baseline values using config ranges
+        # BSEC timestamp — ms since boot, starts at random offset
+        self._bsec_timestamp = random.randint(5000000, 10000000)
+        self._bsec_ts_increment = random.randint(250, 800)  # Real: ~300-700ms between readings
+
+        # Initialize with field-realistic baseline values
         self.current_values: dict[str, float] = {}
         for key in self.telemetry_keys:
             if key in self.ranges:
@@ -67,9 +70,13 @@ class SimulatedDevice:
                 low, high = BSEC_RANGES[key]
                 self.current_values[key] = round(random.uniform(low, high), 2)
 
-        # Battery starts near full and drains slowly
+        # Gas resistance starts in a realistic mid-range
+        if "gas_resistance" in self.current_values:
+            self.current_values["gas_resistance"] = round(random.uniform(90000, 500000), 2)
+
+        # Battery starts near full (4.0-4.2V like real Wingman)
         if "battery_voltage" in self.current_values:
-            self.current_values["battery_voltage"] = round(random.uniform(3.8, 4.2), 2)
+            self.current_values["battery_voltage"] = round(random.uniform(4.05, 4.20), 2)
 
     def _pick_model(self, models: list[DeviceModelConfig]) -> DeviceModelConfig:
         """Pick a device model based on weighted probability."""
@@ -87,6 +94,7 @@ class SimulatedDevice:
     def generate_telemetry(self) -> dict:
         """Generate next telemetry reading with realistic BSEC drift."""
         self.cycle += 1
+        self._bsec_timestamp += self._bsec_ts_increment + random.randint(-50, 50)
 
         for key in self.telemetry_keys:
             current = self.current_values.get(key, 0)
@@ -100,33 +108,57 @@ class SimulatedDevice:
             else:
                 continue
 
-            # Random walk bounded by realistic range
-            new_val = current + random.uniform(-drift, drift)
-            new_val = max(low, min(high, new_val))
+            # Gas index always increments by 1 (like real BSEC)
+            if key == "gas_index":
+                self.current_values[key] = current + 1
+                continue
 
-            # Gas resistance has huge range — use log-scale drift
+            # Gas resistance: log-scale random walk with occasional large jumps
             if key == "gas_resistance":
                 if current > 0:
-                    multiplier = 1 + random.uniform(-0.05, 0.05)
+                    multiplier = 1 + random.uniform(-0.08, 0.08)
+                    # Occasional large jump (BSEC recalibration event)
+                    if random.random() < 0.05:
+                        multiplier = random.uniform(0.3, 3.0)
                     new_val = current * multiplier
+                    new_val = max(low, min(high, new_val))
                 else:
-                    new_val = random.uniform(50000, 500000)
+                    new_val = random.uniform(90000, 500000)
+                self.current_values[key] = round(new_val, 2)
+                continue
 
-            # Battery slowly drains (never charges in sim)
+            # Battery slowly drains (never charges)
             if key == "battery_voltage":
-                drain = random.uniform(0, 0.005)
+                drain = random.uniform(0, 0.003)
                 new_val = current - drain
-                new_val = max(3.0, new_val)
+                new_val = max(low, new_val)
+                self.current_values[key] = round(new_val, 2)
+                continue
 
+            # General random walk bounded by realistic range
+            new_val = current + random.uniform(-drift, drift)
+            new_val = max(low, min(high, new_val))
             self.current_values[key] = round(new_val, 2)
 
         return dict(self.current_values)
 
     def to_mosquitto_payload(self) -> dict:
-        """Generate Mosquitto payload (Mode A).
+        """Generate Mosquitto payload matching real Wingman BSEC field output.
 
-        Matches the format consumed by TB Gateway's direct_mqtt.json converter.
-        Uses snake_case keys matching real Wingman BSEC device telemetry.
+        Payload mirrors the exact format from field devices:
+          BSEC outputs:
+            Time stamp = 7164111
+            Temperature = 33.15
+            Pressure    = 976.03
+            Humidity    = 22.91
+            Gas resist. = 96786.39
+            Gas index   = 0
+          >> SerialNumber: 00000000002C
+          Voltaje bateria: 4.17
+          model: Nordic
+          Perfil: ULP
+          Ciclo: 222
+          EVT:TX_DONE
         """
         telemetry = self.generate_telemetry()
         return {
@@ -134,28 +166,24 @@ class SimulatedDevice:
             "pressure": telemetry.get("pressure", 0),
             "humidity": telemetry.get("humidity", 0),
             "gas_resistance": telemetry.get("gas_resistance", 0),
-            "gas_index": telemetry.get("gas_index", 0),
+            "gas_index": int(telemetry.get("gas_index", 0)),
             "battery_voltage": telemetry.get("battery_voltage", 0),
             "cycle": self.cycle,
             "dev_eui": self.serial_number.zfill(16).lower(),
             "event": "EVT:TX_DONE",
-            "gateway": "gw-simulator",
-            "lorawan_tx": False,
+            "gateway": "gw-lora-0001",
+            "lorawan_tx": True,
             "model": self.model.name,
             "profile": self.perfil,
             "serial_number": self.serial_number,
-            "source": "iot-simulator",
-            "time_stamp": int(datetime.now(timezone.utc).timestamp() * 1000),
+            "source": "bsec-simulator",
+            "time_stamp": self._bsec_timestamp,
+            "class_1_probability": round(random.uniform(0, 15), 2),
+            "class_2_probability": round(random.uniform(85, 100), 2),
         }
 
     def to_chirpstack_uplink(self, application_id: str = "simulator") -> dict:
-        """Generate ChirpStack v4 compatible uplink payload (Mode A).
-
-        Wraps BSEC telemetry in ChirpStack's event/up format so the
-        TB IoT Gateway's ChirpStackUplinkConverter can process it.
-
-        Topic: application/{application_id}/device/{dev_eui}/event/up
-        """
+        """Generate ChirpStack v4 compatible uplink payload."""
         telemetry = self.generate_telemetry()
         now = datetime.now(timezone.utc)
         dev_eui = self.serial_number.zfill(16).lower()
@@ -170,7 +198,7 @@ class SimulatedDevice:
                 "tags": {
                     "model": self.model.name,
                     "profile": self.perfil,
-                    "source": "iot-simulator",
+                    "source": "bsec-simulator",
                 },
             },
             "object": {
@@ -178,7 +206,7 @@ class SimulatedDevice:
                 "pressure": telemetry.get("pressure", 0),
                 "humidity": telemetry.get("humidity", 0),
                 "gas_resistance": telemetry.get("gas_resistance", 0),
-                "gas_index": telemetry.get("gas_index", 0),
+                "gas_index": int(telemetry.get("gas_index", 0)),
                 "battery_voltage": telemetry.get("battery_voltage", 0),
                 "model": self.model.name,
                 "profile": self.perfil,
@@ -197,11 +225,7 @@ class SimulatedDevice:
 
     @property
     def chirpstack_topic(self) -> str:
-        """ChirpStack-compatible MQTT topic for this device.
-
-        Format: application/{app_id}/device/{dev_eui}/event/up
-        Matches TB IoT Gateway subscription: application/+/device/+/event/up
-        """
+        """ChirpStack-compatible MQTT topic for this device."""
         dev_eui = self.serial_number.zfill(16).lower()
         return f"application/simulator/device/{dev_eui}/event/up"
 

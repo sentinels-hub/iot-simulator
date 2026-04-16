@@ -1,8 +1,8 @@
-# Iberdrola Arenales — Mode A: Via Mosquitto + Nginx
+# Iberdrola Arenales — Mode A: BSEC Simulator (48h stress test)
 #
-# Simulates BSEC telemetry through the realistic field gateway flow.
-# Each device publishes telemetry to the topic that the TB IoT Gateway
-# subscribes to (gw-lora-0001/bme680/data).
+# 50 simulated Wingman devices sending BSEC telemetry at 3s intervals.
+# Payload matches real field device output (SerialNumber 00000000002C pattern).
+# Runs for 48 hours continuously.
 #
 # Connection: MQTT/WebSocket/TLS to gw-lora-0001...:443/mqtt
 # Auth: Anonymous (ClientID only)
@@ -19,7 +19,7 @@ transport:
     mqtt_use_tls: true
     mqtt_websocket_path: "/mqtt"
     mqtt_protocol: "websockets"
-    client_id: "gw-simulator-001"
+    client_id: "gw-simulator-stress-001"
     mqtt_username: ""
     mqtt_password: ""
     mosquitto_topic: "gw-lora-0001/bme680/data"
@@ -48,7 +48,7 @@ devices:
       perfil: "standard"
 
 telemetry:
-  interval_seconds: 30
+  interval_seconds: 3
   keys:
     - temperature
     - pressure
@@ -58,30 +58,30 @@ telemetry:
     - battery_voltage
   ranges:
     temperature:
-      min: 15.0
-      max: 50.0
-      drift: 0.5
+      min: 28.0
+      max: 45.0
+      drift: 0.15
     pressure:
-      min: 950.0
-      max: 1050.0
-      drift: 1.0
+      min: 970.0
+      max: 985.0
+      drift: 0.02
     humidity:
-      min: 10.0
-      max: 95.0
-      drift: 2.0
+      min: 15.0
+      max: 35.0
+      drift: 0.25
     gas_resistance:
-      min: 1000.0
+      min: 50000.0
       max: 15000000.0
-      drift: 50000.0
+      drift: 0.0
     gas_index:
       min: 0
       max: 500
-      drift: 5
+      drift: 0
     battery_voltage:
-      min: 3.0
+      min: 3.5
       max: 4.2
-      drift: 0.01
+      drift: 0.002
 
 schedule:
   mode: "duration"
-  duration_minutes: 60
+  duration_minutes: 2880   # 48 hours
