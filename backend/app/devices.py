@@ -126,21 +126,84 @@ class SimulatedDevice:
         """Generate Mosquitto payload (Mode A).
 
         Matches the format consumed by TB Gateway's direct_mqtt.json converter.
+        Uses snake_case keys matching real Wingman BSEC device telemetry.
         """
         telemetry = self.generate_telemetry()
         return {
-            "SerialNumber": self.serial_number,
-            "Temperature": telemetry.get("temperature", 0),
-            "Pressure": telemetry.get("pressure", 0),
-            "Humidity": telemetry.get("humidity", 0),
-            "Gas_resist": telemetry.get("gas_resistance", 0),
-            "Gas_index": telemetry.get("gas_index", 0),
-            "Time_stamp": int(datetime.now(timezone.utc).timestamp() * 1000),
-            "Voltaje_bateria": telemetry.get("battery_voltage", 0),
+            "temperature": telemetry.get("temperature", 0),
+            "pressure": telemetry.get("pressure", 0),
+            "humidity": telemetry.get("humidity", 0),
+            "gas_resistance": telemetry.get("gas_resistance", 0),
+            "gas_index": telemetry.get("gas_index", 0),
+            "battery_voltage": telemetry.get("battery_voltage", 0),
+            "cycle": self.cycle,
+            "dev_eui": self.serial_number.zfill(16).lower(),
+            "event": "EVT:TX_DONE",
+            "gateway": "gw-simulator",
+            "lorawan_tx": False,
             "model": self.model.name,
-            "Perfil": self.perfil,
-            "Ciclo": self.cycle,
+            "profile": self.perfil,
+            "serial_number": self.serial_number,
+            "source": "iot-simulator",
+            "time_stamp": int(datetime.now(timezone.utc).timestamp() * 1000),
         }
+
+    def to_chirpstack_uplink(self, application_id: str = "simulator") -> dict:
+        """Generate ChirpStack v4 compatible uplink payload (Mode A).
+
+        Wraps BSEC telemetry in ChirpStack's event/up format so the
+        TB IoT Gateway's ChirpStackUplinkConverter can process it.
+
+        Topic: application/{application_id}/device/{dev_eui}/event/up
+        """
+        telemetry = self.generate_telemetry()
+        now = datetime.now(timezone.utc)
+        dev_eui = self.serial_number.zfill(16).lower()
+
+        return {
+            "deviceInfo": {
+                "devEui": dev_eui,
+                "deviceName": self.name,
+                "applicationId": application_id,
+                "applicationName": "IoT Simulator",
+                "deviceProfileName": "BME680 Sensor",
+                "tags": {
+                    "model": self.model.name,
+                    "profile": self.perfil,
+                    "source": "iot-simulator",
+                },
+            },
+            "object": {
+                "temperature": telemetry.get("temperature", 0),
+                "pressure": telemetry.get("pressure", 0),
+                "humidity": telemetry.get("humidity", 0),
+                "gas_resistance": telemetry.get("gas_resistance", 0),
+                "gas_index": telemetry.get("gas_index", 0),
+                "battery_voltage": telemetry.get("battery_voltage", 0),
+                "model": self.model.name,
+                "profile": self.perfil,
+                "cycle": self.cycle,
+                "serial_number": self.serial_number,
+                "event": "EVT:TX_DONE",
+            },
+            "time": now.strftime("%Y-%m-%dT%H:%M:%S.") + f"{now.microsecond // 1000:03d}Z",
+            "devAddr": f"sim{self.index:05d}",
+            "fCnt": self.cycle,
+            "fPort": 1,
+            "adr": True,
+            "confirmed": False,
+            "data": "",
+        }
+
+    @property
+    def chirpstack_topic(self) -> str:
+        """ChirpStack-compatible MQTT topic for this device.
+
+        Format: application/{app_id}/device/{dev_eui}/event/up
+        Matches TB IoT Gateway subscription: application/+/device/+/event/up
+        """
+        dev_eui = self.serial_number.zfill(16).lower()
+        return f"application/simulator/device/{dev_eui}/event/up"
 
     def to_tb_values(self) -> dict:
         """Generate ThingsBoard values dict (used in Mode B gateway payload)."""

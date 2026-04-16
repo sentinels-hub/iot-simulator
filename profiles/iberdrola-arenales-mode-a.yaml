@@ -1,8 +1,12 @@
 # Iberdrola Arenales — Mode A: Via Mosquitto + Nginx
 #
 # Simulates BSEC telemetry through the realistic field gateway flow.
-# Devices connect to Mosquitto via Nginx WebSocket/TLS on port 443.
-# Anonymous auth (ClientID only).
+# Each device publishes telemetry to the topic that the TB IoT Gateway
+# subscribes to (gw-lora-0001/bme680/data).
+#
+# Connection: MQTT/WebSocket/TLS to gw-lora-0001...:443/mqtt
+# Auth: Anonymous (ClientID only)
+# Topic: gw-lora-0001/bme680/data
 
 name: "iberdrola-arenales-mode-a"
 
@@ -18,7 +22,7 @@ transport:
     client_id: "gw-simulator-001"
     mqtt_username: ""
     mqtt_password: ""
-    mosquitto_topic: "gw-lora-0001/bme680"
+    mosquitto_topic: "gw-lora-0001/bme680/data"
 
   tb_direct:
     tb_host: "aiot.sentinels.pro"

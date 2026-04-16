@@ -52,9 +52,7 @@ class SimulationEngine:
         elif self.profile.transport.mode == TransportMode.TB_DIRECT:
             self.transport = TbDirectTransport(self.profile.transport.tb_direct)
         else:
-            logger.error(
-                f"[{self.id}] Unknown transport mode: {self.profile.transport.mode}"
-            )
+            logger.error(f"[{self.id}] Unknown transport mode: {self.profile.transport.mode}")
             return False
 
         return True
@@ -115,9 +113,7 @@ class SimulationEngine:
 
         self.state.status = SimulationStatus.STOPPED
         self.state.stopped_at = datetime.now(timezone.utc)
-        self._log(
-            f"Simulation stopped — sent {self.state.messages_sent} messages total"
-        )
+        self._log(f"Simulation stopped — sent {self.state.messages_sent} messages total")
         logger.info(
             f"[{self.id}] Simulation '{self.profile.name}' stopped — "
             f"sent {self.state.messages_sent} messages"
@@ -171,9 +167,7 @@ class SimulationEngine:
             if duration_seconds:
                 elapsed = time.time() - start_time
                 if elapsed >= duration_seconds:
-                    self._log(
-                        f"Duration reached ({self.profile.schedule.duration_minutes}min)"
-                    )
+                    self._log(f"Duration reached ({self.profile.schedule.duration_minutes}min)")
                     logger.info(
                         f"[{self.id}] Simulation duration reached "
                         f"({self.profile.schedule.duration_minutes}min)"
@@ -190,7 +184,8 @@ class SimulationEngine:
             return
 
         if self.profile.transport.mode == TransportMode.MOSQUITTO_VIA_NGINX:
-            # Mode A: Send each device as individual Mosquitto message
+            # Mode A: Send each device telemetry to the configured Mosquitto topic
+            # Topic: gw-lora-0001/bme680/data — matches TB IoT Gateway subscription
             for device in self.devices:
                 payload = device.to_mosquitto_payload()
                 success = self.transport.publish(payload)
@@ -232,12 +227,8 @@ class SimulationEngine:
             "transport_mode": self.profile.transport.mode.value,
             "devices_active": self.state.devices_active,
             "messages_sent": self.state.messages_sent,
-            "started_at": self.state.started_at.isoformat()
-            if self.state.started_at
-            else None,
-            "stopped_at": self.state.stopped_at.isoformat()
-            if self.state.stopped_at
-            else None,
+            "started_at": self.state.started_at.isoformat() if self.state.started_at else None,
+            "stopped_at": self.state.stopped_at.isoformat() if self.state.stopped_at else None,
             "errors": self.state.errors[-10:],
             "last_telemetry_preview": str(self.state.last_telemetry)[:200]
             if self.state.last_telemetry

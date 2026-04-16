@@ -48,7 +48,11 @@ class MosquittoTransport:
                 client_id=self.config.client_id,
                 transport="websockets",
             )
-            self.client.ws_set_options(path=self.config.mqtt_websocket_path)
+            # Explicit MQTT subprotocol header required by Mosquitto
+            self.client.ws_set_options(
+                path=self.config.mqtt_websocket_path,
+                headers={"Sec-WebSocket-Protocol": "mqtt"},
+            )
         else:
             self.client = mqtt.Client(
                 callback_api_version=CallbackAPIVersion.VERSION2,
@@ -65,9 +69,7 @@ class MosquittoTransport:
 
         # Anonymous auth — no username/password unless configured
         if self.config.mqtt_username:
-            self.client.username_pw_set(
-                self.config.mqtt_username, self.config.mqtt_password
-            )
+            self.client.username_pw_set(self.config.mqtt_username, self.config.mqtt_password)
 
         # v2 callback signatures: (client, userdata, flags, reason_code, properties)
         self.client.on_connect = self._on_connect
@@ -86,20 +88,25 @@ class MosquittoTransport:
             logger.error(f"Failed to connect to Mosquitto: {e}")
             return False
 
-    def publish(self, payload: dict) -> bool:
-        """Publish telemetry payload to Mosquitto topic."""
+    def publish(self, payload: dict, topic: str | None = None) -> bool:
+        """Publish telemetry payload to Mosquitto topic.
+
+        Args:
+            payload: JSON-serializable dict.
+            topic: Override topic. Falls back to config default.
+        """
         if not self.client or not self.connected:
             logger.warning("Not connected, cannot publish")
             return False
 
-        topic = self.config.mosquitto_topic
+        publish_topic = topic or self.config.mosquitto_topic
         message = json.dumps(payload)
 
-        result = self.client.publish(topic, message, qos=1)
+        result = self.client.publish(publish_topic, message, qos=1)
 
         if result.rc == mqtt.MQTT_ERR_SUCCESS:
             self._message_count += 1
-            logger.debug(f"Published to {topic}: {message[:100]}...")
+            logger.debug(f"Published to {publish_topic}: {message[:100]}...")
             return True
         else:
             logger.error(f"Publish failed with rc={result.rc}")
@@ -127,15 +134,11 @@ class MosquittoTransport:
         else:
             logger.error(f"Mosquitto connection failed: reason_code={reason_code}")
 
-    def _on_disconnect(
-        self, client, userdata, flags, reason_code=None, properties=None
-    ):
+    def _on_disconnect(self, client, userdata, flags, reason_code=None, properties=None):
         """v2 on_disconnect callback — auto-reconnect on unexpected disconnect."""
         self.connected = False
         if reason_code != 0 and reason_code is not None:
-            logger.warning(
-                f"Unexpected Mosquitto disconnect: reason_code={reason_code}"
-            )
+            logger.warning(f"Unexpected Mosquitto disconnect: reason_code={reason_code}")
             self._attempt_reconnect()
 
     def _on_publish(self, client, userdata, mid, reason_code=None, properties=None):
