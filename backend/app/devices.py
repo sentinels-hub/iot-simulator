@@ -145,39 +145,49 @@ class SimulatedDevice:
     def to_mosquitto_payload(self) -> dict:
         """Generate Mosquitto payload matching real Wingman BSEC field output.
 
-        Payload mirrors the exact format from field devices:
+        Payload mirrors the exact format from field devices — keys MUST match
+        the TB IoT Gateway converter (direct_mqtt.json) which expects
+        PascalCase/mixed-case field names, NOT snake_case:
+
           BSEC outputs:
-            Time stamp = 7164111
+            Time_stamp = 7164111
             Temperature = 33.15
             Pressure    = 976.03
             Humidity    = 22.91
-            Gas resist. = 96786.39
-            Gas index   = 0
+            Gas_resist  = 96786.39
+            Gas_index   = 0
           >> SerialNumber: 00000000002C
-          Voltaje bateria: 4.17
+          Voltaje_bateria: 4.17
           model: Nordic
           Perfil: ULP
           Ciclo: 222
           EVT:TX_DONE
+
+        Converter mapping (direct_mqtt.json):
+          deviceNameJsonExpression: ${SerialNumber}
+          attributes: model, Perfil, Ciclo, Voltaje_bateria
+          timeseries: Time_stamp, Temperature, Pressure, Humidity, Gas_resist, Gas_index
         """
         telemetry = self.generate_telemetry()
         return {
-            "temperature": telemetry.get("temperature", 0),
-            "pressure": telemetry.get("pressure", 0),
-            "humidity": telemetry.get("humidity", 0),
-            "gas_resistance": telemetry.get("gas_resistance", 0),
-            "gas_index": int(telemetry.get("gas_index", 0)),
-            "battery_voltage": telemetry.get("battery_voltage", 0),
-            "cycle": self.cycle,
+            # --- Fields mapped by TB IoT Gateway converter ---
+            "Temperature": telemetry.get("temperature", 0),
+            "Pressure": telemetry.get("pressure", 0),
+            "Humidity": telemetry.get("humidity", 0),
+            "Gas_resist": telemetry.get("gas_resistance", 0),
+            "Gas_index": int(telemetry.get("gas_index", 0)),
+            "Time_stamp": self._bsec_timestamp,
+            "SerialNumber": self.serial_number,
+            "model": self.model.name,
+            "Perfil": self.perfil,
+            "Ciclo": self.cycle,
+            "Voltaje_bateria": telemetry.get("battery_voltage", 0),
+            # --- Extra fields (not mapped by converter, but present in real output) ---
             "dev_eui": self.serial_number.zfill(16).lower(),
             "event": "EVT:TX_DONE",
             "gateway": "gw-lora-0001",
             "lorawan_tx": True,
-            "model": self.model.name,
-            "profile": self.perfil,
-            "serial_number": self.serial_number,
             "source": "bsec-simulator",
-            "time_stamp": self._bsec_timestamp,
             "class_1_probability": round(random.uniform(0, 15), 2),
             "class_2_probability": round(random.uniform(85, 100), 2),
         }
